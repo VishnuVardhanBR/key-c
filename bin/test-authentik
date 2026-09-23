@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Run authentication fixtures in the pinned container without writing to its DB."""
+from pathlib import Path
+import subprocess
+
+root = Path(__file__).resolve().parent.parent
+policy = (root / 'bin/fresh_login_policy.py').read_text()
+tests = (root / 'test/authentik-reuse.py').read_text()
+program = f"""
+import os, sys, types
+os.environ.setdefault('AUTHENTIK_LOG_LEVEL', 'error')
+module = types.ModuleType('fresh_login_policy')
+sys.modules[module.__name__] = module
+exec(compile({policy!r}, 'fresh_login_policy.py', 'exec'), module.__dict__)
+exec(compile({tests!r}, 'authentik-reuse.py', 'exec'), globals())
+"""
+subprocess.run([str(root / 'bin/compose'), 'exec', '-T', 'server', 'python', '-'],
+               input=program, text=True, check=True)

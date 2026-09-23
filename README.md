@@ -12,6 +12,8 @@ Secure browser access to your Mac **terminal**, **Paseo agents**, and **desktop 
 
 > Disconnecting does not stop tmux sessions or desktop apps. Locking key-c does not lock the physical Mac.
 
+Checks: `npm test` covers the gateway; `python3 bin/test-authentik` checks key reuse and the login handoff in the running authentik container using isolated fixtures.
+
 ## Architecture
 
 ```mermaid

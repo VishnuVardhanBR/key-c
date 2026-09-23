@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+from fresh_login_policy import configure_login_context
 
 spec = importlib.util.spec_from_file_location('setup', Path(__file__).with_name('configure-authentik.py'))
 setup = importlib.util.module_from_spec(spec)
@@ -33,7 +34,9 @@ login = setup.upsert('stages/user_login/', {'name': 'terminal-fresh-login-event'
     'session_duration': 'hours=1', 'remember_me_offset': 'seconds=0',
     'remember_device': 'seconds=0', 'terminate_other_sessions': True})
 setup.bind_stage(flow, validate, 10)
-setup.bind_stage(flow, login, 20)
+login_binding = setup.bind_stage(flow, login, 20)
+# Run only after key validation succeeds, including its signed 30-second reuse.
+configure_login_context(setup, login_binding, owner_id)
 setup.bind_policy(flow['pk'], user=owner_id)
 provider = setup.upsert('providers/oauth2/', {
     **{k: base[k] for k in ['authentication_flow', 'invalidation_flow', 'signing_key', 'property_mappings']},
