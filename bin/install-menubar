@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Build/install Key C.app and its login/awake jobs without restarting Key C."""
+from datetime import datetime, timezone
+from pathlib import Path
+import argparse
+import os
+import platform
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from menu_control import install_jobs
+from service_watchdog import NAMES, RUNTIME, plist
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--build-only', type=Path, help='Build the app in this directory without installing.')
+parser.add_argument('--portal-url', help='HTTPS portal URL for installations without deployment.json.')
+args = parser.parse_args()
+if args.portal_url and not re.fullmatch(r'https://[a-zA-Z0-9.-]+/?', args.portal_url):
+    parser.error('Use an HTTPS portal URL without a path.')
+source = Path(__file__).resolve().parent.parent
+python = str(Path(sys.executable).resolve())
+if not args.build_only:
+    for name in NAMES:
+        if not plist(name).is_file():
+            sys.exit(f'Install the Key C services first; missing {name}.')
+
+with tempfile.TemporaryDirectory(prefix='key-c-build-') as temporary:
+    app = Path(temporary) / 'Key C.app'
+    contents = app / 'Contents'
+    (contents / 'MacOS').mkdir(parents=True)
+    (contents / 'Resources').mkdir()
+    info = {'CFBundleIdentifier': 'com.keyc.menubar', 'CFBundleName': 'Key C',
+            'CFBundleDisplayName': 'Key C', 'CFBundleExecutable': 'KeyC',
+            'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1',
+            'CFBundleShortVersionString': '1.0', 'LSUIElement': True,
+            'LSMinimumSystemVersion': '13.0', 'KeyCPython': python,
+            'NSHighResolutionCapable': True}
+    (contents / 'Info.plist').write_bytes(plistlib.dumps(info))
+    subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-swift-version', '5',
+                    '-target', platform.machine() + '-apple-macosx13.0',
+                    '-module-cache-path', str(Path(temporary) / 'module-cache'),
+                    '-framework', 'AppKit', str(source / 'macos/KeyC.swift'),
+                    '-o', str(contents / 'MacOS/KeyC')], check=True)
+    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(app)], check=True)
+    if args.build_only:
+        destination = args.build_only / app.name
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(app, destination)
+        print(destination)
+        sys.exit(0)
+    destination = Path.home() / 'Applications/Key C.app'
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%SZ')
+    backup = RUNTIME / 'private-backups' / f'menubar-{timestamp}'
+    backup.mkdir(mode=0o700, parents=True)
+    if destination.exists():
+        destination.rename(backup / app.name)
+    shutil.copytree(app, destination)
+    installed = RUNTIME / 'app/bin'
+    for name in ('control', 'service_watchdog.py', 'menu_control.py'):
+        target = installed / name
+        if target.exists():
+            shutil.copy2(target, backup / name)
+        # Atomic replacement: the existing watchdog may be running during install.
+        temporary_target = target.with_suffix('.installing')
+        shutil.copy2(source / 'bin' / name, temporary_target)
+        temporary_target.chmod(0o700)
+        temporary_target.replace(target)
+    install_jobs(destination, python, args.portal_url)
+    print(f'Installed {destination}. Key C services were not restarted.')
+    print('The menu opens at login; caffeinate runs while Key C is on.')
+    print('Enable Keep Desktop Unlocked in the menu to approve the macOS setting.')

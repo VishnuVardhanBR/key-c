@@ -10,9 +10,9 @@ Secure browser access to your Mac **terminal**, **Paseo agents**, and **desktop 
 - **2-minute idle lock**: User input resets the timer; output alone does not.
 - **Session end events**: Lock, connection loss, and login expiry end browser access.
 
-> Disconnecting does not stop tmux sessions or desktop apps. Locking key-c does not lock the physical Mac.
+> Disconnecting does not stop tmux sessions or desktop apps. macOS Screen Sharing can lock the physical desktop on disconnect; the menu app can change that behavior.
 
-Checks: `npm test` covers the gateway; `python3 bin/test-authentik` checks key reuse and the login handoff in the running authentik container using isolated fixtures.
+Checks: `npm test` covers the gateway; `python3 -B -m unittest discover -s test -p 'test_*.py'` covers service controls; `python3 bin/test-authentik` checks key reuse and the login handoff in the running authentik container using isolated fixtures.
 
 ## Architecture
 
@@ -187,10 +187,26 @@ sudo python3 bin/setup-novnc --remove
 
 ## Operation
 
-Use:
-- `bin/control status`
-- `bin/control stop`
-- `bin/control start`
+### Menu bar
+
+After the services are installed, build the native menu app (requires Xcode Command Line Tools):
+
+```sh
+python3 bin/install-menubar
+```
+
+This installs `~/Applications/Key C.app`, opens it at login, and adds `caffeinate -dis` to keep the Mac and display awake. Existing Key C services are not restarted. Older installations without `deployment.json` can pass `--portal-url https://computer.your-domain`.
+
+- **Turn Key C On/Off** starts or stops remote access. Off persists across login and the recovery watchdog respects it.
+- **Keep Mac Awake** runs `caffeinate` while Key C is on, independently of the menu app. Amphetamine is not needed for ordinary idle sleep; `caffeinate` does not override lid-close sleep.
+- **Keep Desktop Unlocked** changes Screen Sharing's `RestoreMachineState` setting after macOS administrator approval. It leaves the physical desktop unlocked after disconnect; test with a fresh desktop session. YubiKey authentication is unchanged.
+- **Open Menu at Login** controls the menu's startup. Enabled services start at login independently. Quitting the menu keeps services running.
+
+The menu also opens the portal and logs and shows each service's process state. A process running does not guarantee an end-to-end sign-in will succeed.
+
+### Command line
+
+Use `bin/control status`, `bin/control stop`, or `bin/control start`. Start preserves already running processes. The watchdog checks every 60 seconds and only restarts an unresponsive service after three failed checks, with a five-minute recovery cooldown.
 
 Runtime/logs: `~/Library/Application Support/key-c`.
 

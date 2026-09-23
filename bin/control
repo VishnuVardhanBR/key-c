@@ -1,42 +1,78 @@
 #!/usr/bin/env python3
-"""Start, stop, or inspect this Mac's key-c services without deleting data."""
+"""Start, stop, or inspect key-c and its automatic recovery on this Mac."""
 from pathlib import Path
 import argparse
+import shutil
 import os
 import subprocess
 import time
+from service_watchdog import (DOMAIN, NAMES, PAUSED, RUNTIME, STATE,
+                              launchctl, plist, service, service_lock)
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('action', choices=['status', 'start', 'stop'])
-action = parser.parse_args().action
-target = f'gui/{os.getuid()}'
-runtime = Path.home() / 'Library/Application Support/key-c'
-names = ['identity', 'terminal', 'paseo', 'origin', 'tunnel']
-for name in reversed(names) if action == 'stop' else names:
-    label = f'com.keyc.remote-{name}'
-    service = f'{target}/{label}'
-    result = subprocess.run(['launchctl', 'print', service], capture_output=True, text=True)
+
+def require(result, action):
+    if result.returncode:
+        raise SystemExit(f'{action} failed: {result.stderr.strip()}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['status', 'start', 'stop'])
+    action = parser.parse_args().action
+    os.umask(0o077)
     if action == 'status':
-        state = next((line.strip() for line in result.stdout.splitlines()
-                      if line.strip().startswith('state =')), 'not loaded')
-        print(f'{name}: {state}')
-    elif action == 'stop':
-        if result.returncode == 0:
-            subprocess.run(['launchctl', 'bootout', service], check=True)
-            for _ in range(50):
-                if subprocess.run(['launchctl', 'print', service], capture_output=True).returncode:
-                    break
-                time.sleep(0.2)
-        print(f'{name}: stopped')
-    else:
-        if result.returncode:
-            plist = Path.home() / 'Library/LaunchAgents' / f'{label}.plist'
-            subprocess.run(['launchctl', 'bootstrap', target, str(plist)], check=True)
-        print(f'{name}: started')
-if action == 'status':
-    subprocess.run([str(Path(__file__).resolve().parent / 'compose'), 'ps',
-                    '--format', '{{.Service}}: {{.State}} ({{.Health}})'], check=False)
-    subprocess.run(['tmux', '-S', str(runtime / 'run/tmux.sock'),
-                    'list-sessions'], check=False)
-elif action == 'stop':
-    print('key-c and the shared Paseo daemon stopped. tmux shells and stored data remain on this Mac.')
+        print('Automatic recovery: ' + ('paused (intentional stop)' if PAUSED.exists() else 'enabled'), flush=True)
+        for name in (*NAMES, 'watchdog'):
+            result = launchctl('print', service(name))
+            state = next((line.strip() for line in result.stdout.splitlines()
+                          if line.strip().startswith('state =')), 'not loaded')
+            if name == 'watchdog' and result.returncode == 0:
+                state = 'scheduled every 60 seconds (' + state.removeprefix('state = ') + ')'
+            print(f'{name}: {state}', flush=True)
+        subprocess.run([str(Path(__file__).resolve().parent / 'compose'), 'ps',
+                        '--format', '{{.Service}}: {{.State}} ({{.Health}})'], timeout=30)
+        subprocess.run([shutil.which('tmux') or '/opt/homebrew/bin/tmux', '-S', str(RUNTIME / 'run/tmux.sock'),
+                        'list-sessions'], timeout=10)
+        return
+    with service_lock():
+        if action == 'stop':
+            # Persist the stop before changing any job, and serialize with the watchdog.
+            PAUSED.touch(mode=0o600)
+            for name in reversed(NAMES):
+                require(launchctl('disable', service(name)), f'{name}: disable')
+                if launchctl('print', service(name)).returncode == 0:
+                    require(launchctl('bootout', service(name)), f'{name}: stop')
+                    for _ in range(50):
+                        if launchctl('print', service(name)).returncode:
+                            break
+                        time.sleep(0.2)
+                    else:
+                        raise SystemExit(f'{name}: service did not unload')
+                print(f'{name}: stopped', flush=True)
+            print('key-c is stopped until you run start, including after login. Stored data and tmux sessions remain.')
+        else:
+            # Refuse a partial start if an installed service definition is missing.
+            for name in (*NAMES, 'watchdog'):
+                if not plist(name).is_file():
+                    raise SystemExit(f'Missing installed service: {plist(name)}')
+            for name in (*NAMES, 'watchdog'):
+                require(launchctl('enable', service(name)), f'{name}: enable')
+                if launchctl('print', service(name)).returncode:
+                    require(launchctl('bootstrap', DOMAIN, str(plist(name))), f'{name}: load')
+                # No -k: starting an already running service does not disconnect anyone.
+                if name != 'watchdog':
+                    require(launchctl('kickstart', service(name)), f'{name}: start')
+                print(f'{name}: enabled', flush=True)
+            PAUSED.unlink(missing_ok=True)
+            STATE.unlink(missing_ok=True)
+        # CLI and menu share the same awake behavior once the menu is installed.
+        awake_plist = Path.home() / 'Library/LaunchAgents/com.keyc.awake.plist'
+        if awake_plist.exists():
+            from menu_control import awake_job, settings
+            awake_job(not PAUSED.exists() and bool(settings().get('keep_awake', True)))
+    if action == 'start':
+        require(launchctl('kickstart', service('watchdog')), 'watchdog: check')
+
+
+if __name__ == '__main__':
+    main()

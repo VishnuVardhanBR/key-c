@@ -18,18 +18,12 @@ jobs = {
     'origin': [node, str(app / 'bin/origin-server.mjs')],
     'tunnel': [str(app / 'bin/tunnel')],
     'identity': [python, str(app / 'bin/identity-service')],
+    'watchdog': [python, str(app / 'bin/service_watchdog.py')],
 }
 (Path.home() / 'Library/LaunchAgents').mkdir(parents=True, exist_ok=True)
 target = f'gui/{os.getuid()}'
 for name, arguments in jobs.items():
     label = f'com.keyc.remote-{name}'
-    subprocess.run(['launchctl', 'bootout', f'{target}/{label}'],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for attempt in range(50):
-        if subprocess.run(['launchctl', 'print', f'{target}/{label}'],
-                          capture_output=True).returncode:
-            break
-        time.sleep(0.2)
     config = {'Label': label, 'ProgramArguments': arguments, 'RunAtLoad': True,
               'KeepAlive': True, 'ThrottleInterval': 10, 'Umask': 63,
               'WorkingDirectory': str(runtime),
@@ -37,8 +31,15 @@ for name, arguments in jobs.items():
               'StandardErrorPath': str(runtime / 'logs' / f'{name}.log'),
               'EnvironmentVariables': {'HOME': str(Path.home()),
                   'PATH': str(Path(node).parent) + ':' + os.environ.get('PATH', os.defpath)}}
+    if name == 'watchdog':
+        config.pop('KeepAlive')
+        config.update(StartInterval=60, ProcessType='Background')
     plist = Path.home() / 'Library/LaunchAgents' / f'{label}.plist'
     plist.write_bytes(plistlib.dumps(config)); plist.chmod(0o600)
+    if subprocess.run(['launchctl', 'print', f'{target}/{label}'], capture_output=True).returncode == 0:
+        continue  # Writing next-login configuration must not disconnect an active user.
+    if (runtime / 'run/services-paused').exists():
+        continue
     for attempt in range(20):
         result = subprocess.run(['launchctl', 'bootstrap', target, str(plist)], capture_output=True)
         if result.returncode == 0:
@@ -46,4 +47,4 @@ for name, arguments in jobs.items():
         time.sleep(0.5)
     else:
         raise SystemExit(result.stderr.decode())
-print('User services installed. They start after macOS login.')
+print('User services installed without restarting loaded jobs. They start after macOS login unless paused.')
