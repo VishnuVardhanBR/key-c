@@ -1,12 +1,16 @@
 # key-c
 
-YubiKey-protected browser access to your Mac's **terminal**, **Paseo coding agents**, and **desktop through noVNC**. Use **All apps** to switch between them.
+Secure browser access to your Mac **terminal**, **Paseo agents**, and **desktop (noVNC)** using a YubiKey.
 
-- **30-second key reuse:** immediate login redirects and refreshes can reuse the same browser's YubiKey check. Reuse does not extend the window; signing in or refreshing after it expires requires the key again.
-- **One active browser session:** signing in elsewhere replaces the previous session.
-- **Two-minute idle lock:** input keeps the session open; app output alone does not. **Lock**, connection loss, and login expiry also end browser access.
+## Security model
 
-Disconnecting leaves tmux work and desktop applications running. Locking key-c does not lock the physical Mac.
+- **YubiKey gate**: Sign-in requires a FIDO2 YubiKey.
+- **30s key reuse**: Redirects/refreshes in the same browser can reuse the last check for 30 seconds.
+- **Single browser session**: A new login invalidates the previous browser session.
+- **2-minute idle lock**: User input resets the timer; output alone does not.
+- **Session end events**: Lock, connection loss, and login expiry end browser access.
+
+> Disconnecting does not stop tmux sessions or desktop apps. Locking key-c does not lock the physical Mac.
 
 ## Architecture
 
@@ -27,17 +31,30 @@ flowchart LR
     Gateway -. OIDC .-> Auth
 ```
 
-Both hostnames use the same tunnel. Access protects the computer hostname; the identity hostname stays reachable for OIDC with management/enrollment routes blocked. The gateway validates Access and completes its own authentik login. authentik and PostgreSQL run in a dedicated Colima VM; noVNC is served by the gateway. Cloudflare terminates public HTTPS.
+Both hostnames use one tunnel. Cloudflare Access protects the computer hostname, while the identity hostname stays reachable for OIDC (with sensitive routes blocked). `authentik` and PostgreSQL run in a dedicated Colima VM.
 
 ## Setup
 
-Requirements: macOS, Node.js 24, Python 3, Docker CLI with Compose v2, Colima, cloudflared, ttyd, and tmux on `PATH`; a Cloudflare-managed domain/Zero Trust team; a FIDO2 YubiKey with PIN and a compatible USB/NFC browser. Keep the Mac awake, online, and logged in, with a separate local administrator/recovery path.
+### Requirements
 
-The pinned Paseo terminal prebuild has been tested on Apple Silicon; verify native dependencies on other platforms. Use a **dedicated authentik instance**: setup changes its default login flows. Run commands from this checkout, in order.
+- macOS
+- Node.js 24
+- Python 3
+- Docker CLI with Compose v2
+- Colima
+- cloudflared
+- ttyd
+- tmux
+- Cloudflare-managed domain + Zero Trust team
+- FIDO2 YubiKey (PIN set) and compatible USB/NFC browser
 
-### 1. Private configuration
+Keep the Mac awake, online, and logged in. Maintain a separate local admin/recovery path.
 
-Create a self-hosted Cloudflare Access application for `computer.<your-domain>` with **Block Everyone**. Record its audience (AUD) and team domain; leave the computer hostname unrouted.
+> Use a dedicated `authentik` instance. Setup modifies default login flows.
+
+### 1) Private configuration
+
+Create a Cloudflare Access app for `computer.<your-domain>` with **Block Everyone**. Record the app AUD and team domain.
 
 ```sh
 npm ci --ignore-scripts
@@ -47,52 +64,90 @@ mkdir -p "$KEY_C_RUNTIME/secrets"
 cp config/deployment.example.json "$KEY_C_RUNTIME/secrets/deployment.json"
 ```
 
-Edit that JSON with distinct computer/identity hostnames, team domain, AUD, owner email/username/display name, and key-model AAGUID. Templates are rejected. All `secrets/...` paths below refer to this private runtime directory, outside Git.
+Edit `deployment.json` with:
+- computer/identity hostnames
+- Cloudflare team domain and AUD
+- owner email/username/display name
+- YubiKey model AAGUID
 
-To read the attached key's AAGUID without enrollment:
+All `secrets/...` paths are in this private runtime directory (outside Git).
+
+Optional AAGUID lookup:
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install fido2
 .venv/bin/python -c 'from fido2.hid import CtapHidDevice; from fido2.ctap2 import Ctap2; [print(Ctap2(d).get_info().aaguid) for d in CtapHidDevice.list_devices()]'
 ```
-Choose the intended key if several are attached. authentik must recognize its metadata as a YubiKey.
 
-### 2. Identity service
+### 2) Identity service
 
 ```sh
 bin/init-secrets
 colima start key-c --cpu 2 --memory 4 --activate=false --edit
 ```
 
-Set `mounts: []` in Colima's editor. Confirm `docker --context colima-key-c info` succeeds, then run `bin/compose up -d`. Check `bin/compose ps` until PostgreSQL, authentik server, and worker are healthy; verify `http://127.0.0.1:19000` responds locally.
+Set `mounts: []` in the Colima editor, then run:
 
-[compose.yml](compose.yml) pins authentik 2026.8.3 and uses named volumes. Private `secrets/authentik.env` contains generated credentials; the initial admin is `akadmin` with its bootstrap password. Bootstrap values initialize only a fresh database; `bin/init-secrets` never overwrites them.
+```sh
+docker --context colima-key-c info
+bin/compose up -d
+bin/compose ps
+```
 
-### 3. Protected key enrollment
+Wait until PostgreSQL, authentik server, and authentik worker are healthy. Verify `http://127.0.0.1:19000` locally.
 
-1. Create a temporary Access application covering the **entire identity hostname**. Allow only your owner email through an existing identity provider or one-time email code. Confirm anonymous requests are blocked before publishing its route.
-2. Create a named Cloudflare Tunnel; save its token in `secrets/tunnel-token` with mode `0600`. Route **only** the identity hostname to `http://127.0.0.1:19000`, followed by a catch-all 404. Point its proxied DNS record to the tunnel and run `bin/tunnel` separately. Keep the computer blocked and unrouted.
-3. Open `https://auth.<your-domain>`, pass temporary Access protection, and log in as `akadmin`. **Keep this admin session open.**
-4. Run `bin/configure-authentik.py`, then `bin/configure-fresh-login.py`. They create the owner/providers and private `authentik-state.json`, `secrets/oidc.json`, and `secrets/fresh-oidc.json`. They disable default password/enrollment flows.
-5. In the existing admin session, [impersonate the owner](https://docs.goauthentik.io/users-sources/user/user_basic_operations). Open `https://auth.<your-domain>/if/flow/key-c-key-enrollment/`, select the physical YubiKey, enter its PIN, and touch it. Enrollment permits only the owner with no existing key; use this final HTTPS hostname, not localhost.
-6. End impersonation and revoke temporary bootstrap sessions/recovery tokens. Apply the identity-route rules in [config/cloudflare.example.json](config/cloudflare.example.json) **in order**: block admin/recovery/enrollment pages, allow the listed login APIs, deny other APIs, and retain the catch-all 404. Keep the computer unrouted.
-7. Only then remove temporary Access protection from the identity hostname so OIDC sign-in is reachable. If setup fails, retain owner-only protection and the computer block while restoring local admin access.
+`compose.yml` pins authentik `2026.8.3` and uses named volumes. `secrets/authentik.env` stores generated credentials.
 
-Upgrading to 30-second reuse: rerun both configuration scripts so login and both authorization flows share the same validation stage.
+### 3) Protected key enrollment
 
-### 4. Cloudflare Access
+1. Temporarily protect the full identity hostname with Access (owner-only).
+2. Create a named Cloudflare Tunnel; store token in `secrets/tunnel-token` (`0600`).
+3. Route only identity hostname to `http://127.0.0.1:19000`, then catch-all 404.
+4. Run `bin/tunnel`, open `https://auth.<your-domain>`, log in as `akadmin`, and keep that admin session open.
+5. Run:
+   ```sh
+   bin/configure-authentik.py
+   bin/configure-fresh-login.py
+   ```
+6. In the existing admin session, impersonate owner and complete key enrollment at `https://auth.<your-domain>/if/flow/key-c-key-enrollment/`.
+7. Revoke temporary bootstrap sessions/recovery tokens.
+8. Apply identity route rules from `config/cloudflare.example.json` in order.
+9. Remove temporary identity-host Access protection only after enrollment and route hardening succeed.
 
-Add a [generic OIDC provider](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/generic-oidc/) using `secrets/oidc.json`. Get authorization, token, and JWKS endpoints from `https://auth.<your-domain>/application/o/key-c-cloudflare/.well-known/openid-configuration`. Use callback `https://<your-team>.cloudflareaccess.com/cdn-cgi/access/callback`, scopes `openid email profile`, and the `email` claim.
+If setup fails, keep computer access blocked while restoring local admin access.
 
-For the computer application, select only this provider, require it in the allow policy, and include only the owner email. Set a one-hour session, HttpOnly cookies, and SameSite Lax. Replace Block Everyone only when this policy is ready; add no bypass, service-token, or alternate email-code policies.
+### 4) Cloudflare Access OIDC
 
-Replace every placeholder in [config/cloudflare.example.json](config/cloudflare.example.json) and apply its final tunnel/application/policy settings. Route the computer hostname to `http://127.0.0.1:17682` with the same required Access audience as `deployment.json`. Point both proxied DNS records to the tunnel.
+Create a generic OIDC provider in Cloudflare using `secrets/oidc.json`.
 
-### 5. Local apps
+Use discovery endpoints from:
+`https://auth.<your-domain>/application/o/key-c-cloudflare/.well-known/openid-configuration`
 
-Paseo uses `~/.paseo` and port 6767. Back up any existing home, preserve keypair/pairing files, and stop its old supervisor first. Resolve existing daemon passwords or port conflicts before using this passwordless-loopback integration. Configure provider credentials through each agent CLI, outside Git.
+Set callback:
+`https://<your-team>.cloudflareaccess.com/cdn-cgi/access/callback`
 
-Stop the foreground tunnel, then:
+Use scopes `openid email profile` and claim `email`.
+
+For the computer app policy:
+- only this OIDC provider
+- allow only owner email
+- 1-hour session
+- HttpOnly cookies
+- SameSite=Lax
+- no bypass/service-token/alternate email-code rules
+
+Replace placeholders in `config/cloudflare.example.json` and route computer hostname to `http://127.0.0.1:17682`.
+
+### 5) Local apps
+
+Before installation:
+- back up existing `~/.paseo`
+- preserve keypair/pairing files
+- stop old Paseo supervisor
+- resolve daemon password/port conflicts
+
+Then run:
+
 ```sh
 npm test
 bin/install-paseo
@@ -101,20 +156,63 @@ bin/install-services
 bin/control status
 ```
 
-Services run as your Mac user after login; grant macOS privacy permissions through System Settings. New Paseo homes disable relay; existing settings are preserved. Phone pairing/relay bypasses key-c's YubiKey, idle-lock, and single-browser rules; keep pairing links private.
+### 6) Desktop (noVNC)
 
-### 6. Desktop
+Turn Screen Sharing off, then run:
 
-Turn Screen Sharing **off**, then run `sudo python3 bin/setup-novnc` locally in an interactive terminal. Follow its prompts: allow only your Mac account, disable permission requests, and leave legacy VNC-password access off. noVNC uses your Mac username/password; decline browser password-saving prompts.
+```sh
+sudo python3 bin/setup-novnc
+```
 
-The helper temporarily blocks network VNC traffic and installs a loopback listener using `/Library/key-c/screensharing.plist` and `/Library/LaunchDaemons/com.keyc.screensharing.plist`, leaving Apple's wildcard listener disabled. It requires the standard macOS firewall anchor/service layout; it does not edit `/System` or disable SIP. Failed setup attempts to stop Screen Sharing and retains its firewall guard if isolation is unconfirmed.
+Follow prompts:
+- allow only your Mac account
+- disable permission requests
+- keep legacy VNC password access off
 
-After setup, reboot, macOS updates, or Sharing changes, run `sudo lsof -nP -iTCP:5900 -sTCP:LISTEN`: only `127.0.0.1:5900` and optionally `[::1]:5900` should listen. Resolve any network-facing listener before proceeding. Remove with `sudo python3 bin/setup-novnc --remove`; Screen Sharing remains disabled.
+Validate after setup/reboot/updates:
 
-## Operation and recovery
+```sh
+sudo lsof -nP -iTCP:5900 -sTCP:LISTEN
+```
 
-Use `bin/control status`, `bin/control stop`, and `bin/control start`. Logs/runtime live in `~/Library/Application Support/key-c`; user agents are `~/Library/LaunchAgents/com.keyc.remote-*.plist`. Stopping unloads those agents and stops the shared Paseo daemon; tmux, data, and identity containers remain. To stop containers too, run `bin/compose stop` after stopping the agents.
+Only `127.0.0.1:5900` (and optionally `[::1]:5900`) should listen.
 
-Before relying on access, test all three apps, key reuse before/after 30 seconds, idle lock, browser replacement, reboot/sleep-wake, and local recovery. Public management/recovery/enrollment routes must return 404, including management APIs with an admin token.
+Remove setup with:
 
-Back up the PostgreSQL volume, private runtime credentials/state, and `~/.paseo` outside Git. For a lost key: stop public access, use the local identity service's administrator recovery tools, temporarily reopen enrollment on the final HTTPS hostname under owner-only protection, then close enrollment and revoke temporary access. The first-key-only policy requires a deliberate local admin change for replacement/spare keys. Test recovery while your key still works; leave no public password/email recovery fallback.
+```sh
+sudo python3 bin/setup-novnc --remove
+```
+
+## Operation
+
+Use:
+- `bin/control status`
+- `bin/control stop`
+- `bin/control start`
+
+Runtime/logs: `~/Library/Application Support/key-c`.
+
+Stopping agents does not stop identity containers; run `bin/compose stop` if needed.
+
+## Recovery and validation checklist
+
+Before relying on remote access:
+- test terminal, Paseo, and desktop access
+- test key reuse before/after 30 seconds
+- test idle lock and browser replacement
+- test reboot/sleep-wake behavior
+- verify blocked management/recovery/enrollment routes return `404`
+
+Back up:
+- PostgreSQL volume
+- private runtime secrets/state
+- `~/.paseo`
+
+Lost key recovery flow:
+1. Disable public access.
+2. Recover through local authentik admin path.
+3. Temporarily reopen enrollment on final HTTPS hostname (owner-only).
+4. Enroll replacement key.
+5. Re-close enrollment and revoke temporary access.
+
+Do not leave password/email fallback recovery exposed publicly.
