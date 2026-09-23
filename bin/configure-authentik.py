@@ -99,14 +99,12 @@ def main():
     validation = {
         'name': 'key-c-yubikey-only', 'device_classes': ['webauthn'],
         'not_configured_action': 'deny', 'configuration_stages': [],
-        'last_auth_threshold': 'seconds=0', 'webauthn_user_verification': 'required',
+        'last_auth_threshold': 'seconds=30', 'webauthn_user_verification': 'required',
         'webauthn_hints': ['security-key'], 'webauthn_allowed_device_types': [AAGUID]}
     verify = upsert('stages/authenticator/validate/', validation)
-    # OAuth authorization must also verify a key, even for an existing session
-    # established through a local recovery procedure. Reuse at most 30 seconds
-    # of a successful WebAuthn verification to avoid two immediate PIN prompts.
-    authorization_verify = upsert('stages/authenticator/validate/', {
-        **validation, 'name': 'key-c-oauth-key-check', 'last_auth_threshold': 'seconds=30'})
+    # authentik's signed MFA reuse cookie is scoped to a stage ID. Share this
+    # exact stage across authentication, Access authorization, and the gateway
+    # authorization flow so one key ceremony covers their immediate redirects.
     authentication = flow('key-c-yubikey-login', 'authentication', 'Sign in with your YubiKey')
     authorization = flow('key-c-yubikey-authorize', 'authorization', 'Verify your YubiKey',
                          'require_authenticated')
@@ -114,7 +112,7 @@ def main():
                       'require_authenticated')
     bind_stage(authentication, verify, 10)
     login_binding = bind_stage(authentication, login, 20)
-    bind_stage(authorization, authorization_verify, 10)
+    bind_stage(authorization, verify, 10)
     owner_policy = upsert('policies/expression/', {
         'name': 'key-c-owner-only', 'expression':
         f"user = request.context.get('pending_user', request.user)\nreturn bool(user and user.pk == {owner['pk']})"})

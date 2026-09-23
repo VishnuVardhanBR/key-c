@@ -59,7 +59,7 @@ Enrollment must occur on the final HTTPS identity hostname, so the WebAuthn cred
 1. Create a temporary Cloudflare Access application covering the **entire identity hostname**. Restrict it to your exact owner email, using an already available identity method or one-time email code solely for provisioning. Confirm anonymous requests are blocked before publishing identity routes.
 2. Create a named Cloudflare Tunnel. Save its token as the private file `secrets/tunnel-token` with mode `0600`. For provisioning, route **only** the identity hostname to `http://127.0.0.1:19000`, followed by a catch-all 404. Run `bin/tunnel` in a separate terminal. Keep the computer application blocked and unrouted.
 3. Open `https://auth.<your-domain>`, complete the temporary Access login, then log in as `akadmin`. Keep this admin session open: the next scripts disable default password/enrollment flows.
-4. Run `bin/configure-authentik.py`, then `bin/configure-fresh-login.py`. They create the owner, dedicated flows/providers, and private `authentik-state.json`, `secrets/oidc.json`, and `secrets/fresh-oidc.json`. Owner/provider IDs are discovered dynamically.
+4. Run `bin/configure-authentik.py`, then `bin/configure-fresh-login.py`. They create the owner, dedicated flows/providers, and private `authentik-state.json`, `secrets/oidc.json`, and `secrets/fresh-oidc.json`. Owner/provider IDs are discovered dynamically. When upgrading an existing installation to 30-second key reuse, rerun both scripts so all three flow bindings use the same validation stage.
 5. From the existing authentik admin session, [impersonate the configured owner](https://docs.goauthentik.io/users-sources/user/user_basic_operations). Navigate to `https://auth.<your-domain>/if/flow/key-c-key-enrollment/`. Select the physical YubiKey, enter its PIN, and touch it. The enrollment policy permits only that owner with no existing key.
 6. End impersonation and revoke temporary bootstrap sessions/recovery tokens. Apply the final tunnel restrictions from `config/cloudflare.example.json`: block admin/recovery/enrollment pages, allow only named login-flow APIs, deny all other API paths, and retain the catch-all 404. Enrollment's executor is deliberately absent from the final allowlist.
 7. Remove the temporary Access application on the identity hostname only after these final restrictions are active. The normal identity sign-in must remain reachable for OIDC. Keep the computer application blocked until the next section is complete.
@@ -114,9 +114,11 @@ To remove the helper, run `sudo python3 bin/setup-novnc --remove`; it leaves Scr
 
 ## 7. Acceptance, maintenance, recovery
 
+To check MFA cookie reuse against the pinned identity server without using real credentials or changing database records, run `bin/compose exec -T server python - < test/authentik-reuse.py`. These fixture tests check reuse, expiry, stage isolation, wrong-device rejection, and that reuse does not renew the window. They do not replace the physical browser checks below.
+
 Before depending on remote access, verify:
 
-- A registered YubiKey opens the chooser; immediate refresh requires a new physical key check. An unregistered key and retained cookies alone cannot open an app.
+- A registered YubiKey opens the chooser with one key ceremony across the login redirects. The same browser can reuse that check for 30 seconds, including on refresh; refreshing after that window requires the key again. An unregistered key or expired MFA cookie cannot open an app. All three validation bindings must reference the same `key-c-yubikey-only` stage; reuse cookies are stage-specific.
 - Terminal accepts a harmless command, Paseo connects, and noVNC displays the desktop and accepts input. All apps switches without a new sign-in.
 - Two minutes without interaction locks and clears the page; output alone cannot keep it open. A new browser replaces the old one; disconnected browsers require fresh sign-in.
 - Management APIs and recovery/enrollment routes return 404 publicly, even with an admin token. Invalid Access assertions, unknown hosts, and foreign WebSocket origins are rejected.

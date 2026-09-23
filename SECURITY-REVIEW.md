@@ -5,7 +5,7 @@ This is a bounded source/configuration review, not a penetration-test certificat
 ## Controls
 
 - Cloudflare Access admits the configured owner through the designated authentik OIDC provider. Both the tunnel and gateway validate the Access audience.
-- A dedicated WebAuthn stage requires user verification with zero reuse threshold. A following login stage supplies a new authentication event. The gateway verifies signature, issuer, audience, owner, nonce, state, PKCE, and authentication time.
+- Authentication, Access authorization, and gateway authorization share one WebAuthn stage with required user verification and a 30-second reuse threshold. Its signed, browser-held MFA cookie permits immediate redirects and refreshes without another key ceremony; the window is not renewed by reuse. A following login stage supplies a new authentication event. The gateway verifies signature, issuer, audience, owner, nonce, state, PKCE, and authentication time; that event can reuse a physical verification from the preceding 30 seconds.
 - A 30-second, single-use ticket opens one browser control connection. App documents use one-use grants; APIs and WebSockets require the active in-memory capability.
 - A new valid browser replaces the old one. Idle expiry, Access-token expiry, and control disconnection revoke all associated app access. Background traffic does not extend idle.
 - Proxying strips browser cookies, Access assertions, and capability query parameters. Static files are constrained by realpath to the installed application bundle.
@@ -16,13 +16,19 @@ This is a bounded source/configuration review, not a penetration-test certificat
 
 | Finding | Correction |
 | --- | --- |
-| Retained identity cookies could replace a new key ceremony | Dedicated mandatory WebAuthn authorization flow; signed fresh identity claims checked by the gateway |
+| Retained identity cookies could replace a new key ceremony | Gateway authorization requires the shared WebAuthn stage; only its signed MFA cookie permits reuse for 30 seconds, after which the key is required again |
 | OIDC freshness parameters alone were insufficient in the pinned identity-server implementation | Flow-level key verification and a new login event; no dependence on `prompt=login` or `max_age=0` alone |
 | Blocking admin pages left management APIs reachable | Exact login API allowlist and denial of other identity APIs, including requests with valid admin credentials |
 | Malformed request targets or aborted launch bodies could terminate the gateway | Caught parse/read failures and regression tests proving subsequent session requests still work |
 | Paseo transitives had published advisories | Pinned overrides for `uuid`, `markdown-it`, `linkify-it`, `ai`, and `undici`; audit and compatibility checks required on updates |
 
 An independent reviewer verified the original gateway corrections and its 17 regression tests. Publication adds separate configuration checks. The generalized installer has not been exercised through fresh hardware enrollment on every supported Mac; the manual acceptance steps in SETUP.md remain necessary.
+
+## Review of 30-second key reuse
+
+The September 23, 2026 review found no demonstrated bypass of the approved reuse window. The repository's 23 automated tests and six isolated tests of the installed authentik cookie helpers passed. Those helper tests use fixture signing keys and mocked devices; physical prompt counts and browser refresh behavior before and after expiry still require acceptance testing.
+
+One conditional medium hardening finding remains open: authentik 2026.8.3 [emits the MFA reuse cookie without Secure or HttpOnly](https://github.com/goauthentik/authentik/blob/version/2026.8.3/authentik/stages/authenticator_validate/stage.py#L395-L419). This was confirmed against the installed cookie helper; the final browser-facing MFA response was not captured, so edge enforcement remains unverified. The signed cookie is bound to the stage and enrolled device record, not a particular browser or session. Exploitation requires an additional compromise during its short lifetime, such as cookie theft together with a usable owner session or script execution on the identity origin. Verify or enforce both flags on the final response. No cookie-hardening fix is included in this change.
 
 ## Desktop setup
 

@@ -4,6 +4,6 @@ YubiKey-protected browser access to a Mac's terminal, Paseo, and desktop ([noVNC
 
 `Browser → Cloudflare Access + Tunnel → gateway → Terminal / Paseo / noVNC`
 
-Fresh key login. One browser. Two-minute idle lock.
+YubiKey login with 30-second reuse. One browser. Two-minute idle lock.
 
 [Setup](SETUP.md) · [Security](SECURITY-REVIEW.md)

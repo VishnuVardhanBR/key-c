@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure a mandatory key ceremony for every terminal attachment."""
+"""Require a key check for each attachment, with 30-second browser reuse."""
 import importlib.util
 import json
 import os
@@ -23,9 +23,11 @@ base = setup.api(f"providers/oauth2/{state['provider_id']}/")
 flow = setup.flow('terminal-fresh-authorize', 'authorization', 'Sign in with your YubiKey',
                   'require_authenticated')
 validate = setup.upsert('stages/authenticator/validate/', {
-    'name': 'terminal-key-every-connection', 'device_classes': ['webauthn'],
+    # Must be the same stage ID used by the outer Access login. A separate
+    # stage with the same threshold cannot reuse authentik's signed MFA cookie.
+    'name': 'key-c-yubikey-only', 'device_classes': ['webauthn'],
     'not_configured_action': 'deny', 'configuration_stages': [],
-    'last_auth_threshold': 'seconds=0', 'webauthn_user_verification': 'required',
+    'last_auth_threshold': 'seconds=30', 'webauthn_user_verification': 'required',
     'webauthn_hints': ['security-key'], 'webauthn_allowed_device_types': [setup.AAGUID]})
 login = setup.upsert('stages/user_login/', {'name': 'terminal-fresh-login-event',
     'session_duration': 'hours=1', 'remember_me_offset': 'seconds=0',
