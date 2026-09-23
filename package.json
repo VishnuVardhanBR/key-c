@@ -1,0 +1,12 @@
+{
+  "name": "key-c",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "jose": "6.2.12",
+    "ws": "8.21.3"
+  }
+}

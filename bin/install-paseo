@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Install the pinned Paseo runtime without publishing it or starting an agent."""
+from pathlib import Path
+import json
+from deployment import load_deployment
+import os
+import shutil
+import subprocess
+
+os.umask(0o077)
+deployment = load_deployment()
+source = Path(__file__).resolve().parent.parent
+runtime = Path.home() / 'Library/Application Support/key-c'
+for folder in (runtime, runtime / 'secrets', runtime / 'paseo', Path.home() / '.paseo'):
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.chmod(0o700)
+for name in ('package.json', 'package-lock.json'):
+    shutil.copy2(source / 'paseo' / name, runtime / 'paseo' / name)
+subprocess.run(['npm', 'ci', '--ignore-scripts', '--no-fund'], cwd=runtime / 'paseo', check=True)
+config = Path.home() / '.paseo/config.json'
+if not config.exists():
+    config.write_text(json.dumps({
+        'version': 1,
+        'daemon': {'listen': '127.0.0.1:6767', 'hostnames': [deployment['hostname']],
+                   'relay': {'enabled': False}},
+        'features': {'webUi': {'enabled': True}},
+        'log': {'console': {'level': 'warn'}, 'file': {'level': 'warn'}},
+    }, indent=2) + '\n')
+    config.chmod(0o600)
+print('Paseo runtime installed; existing ~/.paseo configuration and pairing preserved.')

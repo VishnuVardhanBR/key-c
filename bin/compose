@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+RUNTIME="$HOME/Library/Application Support/key-c"
+exec docker --context colima-key-c compose \
+  --env-file "$RUNTIME/secrets/authentik.env" -f "$ROOT/compose.yml" "$@"

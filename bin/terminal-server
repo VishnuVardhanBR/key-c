@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+umask 077
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+RUNTIME="$HOME/Library/Application Support/key-c"
+exec ttyd --interface "$RUNTIME/run/ttyd.sock" \
+  --writable --check-origin --max-clients 4 \
+  --client-option 'titleFixed=Terminal on your Mac' \
+  --client-option 'disableReconnect=true' \
+  "$ROOT/bin/attach-session"

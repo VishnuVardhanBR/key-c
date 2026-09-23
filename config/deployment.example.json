@@ -1,0 +1,10 @@
+{
+  "hostname": "computer.example.com",
+  "identity_hostname": "auth.example.com",
+  "team_domain": "your-team.cloudflareaccess.com",
+  "access_audience": "REPLACE_WITH_ACCESS_AUDIENCE",
+  "owner_email": "owner@example.com",
+  "owner_username": "terminal-owner",
+  "owner_name": "Owner",
+  "key_aaguid": "REPLACE_WITH_YUBIKEY_AAGUID"
+}

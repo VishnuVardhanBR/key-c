@@ -1,0 +1,74 @@
+{
+  "tunnel": {
+    "ingress": [
+      {
+        "path": "^/(-/recovery|if/admin|if/flow/key-c-key-enrollment)(/.*)?$",
+        "service": "http_status:404",
+        "hostname": "auth.example.com"
+      },
+      {
+        "path": "^/api/v3/(flows/executor/(key-c-yubikey-login|key-c-yubikey-authorize|terminal-fresh-authorize|default-invalidation-flow|default-provider-invalidation-flow)|core/brands/current)/?$",
+        "service": "http://127.0.0.1:19000",
+        "hostname": "auth.example.com"
+      },
+      {
+        "path": "^/api(/.*)?$",
+        "service": "http_status:404",
+        "hostname": "auth.example.com"
+      },
+      {
+        "service": "http://127.0.0.1:19000",
+        "hostname": "auth.example.com"
+      },
+      {
+        "service": "http://127.0.0.1:17682",
+        "hostname": "computer.example.com",
+        "originRequest": {
+          "access": {
+            "audTag": [
+              "YOUR_ACCESS_AUDIENCE"
+            ],
+            "required": true,
+            "teamName": "your-team"
+          }
+        }
+      },
+      {
+        "service": "http_status:404"
+      }
+    ]
+  },
+  "application": {
+    "name": "Terminal on personal Mac",
+    "domain": "computer.example.com",
+    "aud": "YOUR_ACCESS_AUDIENCE",
+    "type": "self_hosted",
+    "session_duration": "1h",
+    "allowed_idps": [
+      "YOUR_ACCESS_IDENTITY_PROVIDER_ID"
+    ],
+    "auto_redirect_to_identity": true,
+    "http_only_cookie_attribute": true,
+    "same_site_cookie_attribute": "lax"
+  },
+  "policy": {
+    "name": "Owner with enrolled YubiKey",
+    "decision": "allow",
+    "include": [
+      {
+        "email": {
+          "email": "owner@example.com"
+        }
+      }
+    ],
+    "require": [
+      {
+        "login_method": {
+          "id": "YOUR_ACCESS_IDENTITY_PROVIDER_ID"
+        }
+      }
+    ],
+    "exclude": [],
+    "session_duration": "1h"
+  }
+}

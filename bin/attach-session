@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+umask 077
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+RUNTIME="$HOME/Library/Application Support/key-c"
+exec tmux -S "$RUNTIME/run/tmux.sock" -f "$ROOT/config/tmux.conf" \
+  new-session -A -s terminal -c "$HOME" /bin/zsh -l

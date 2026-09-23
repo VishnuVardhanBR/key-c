@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Install the local terminal without publishing any network routes."""
+import os
+import pathlib
+import plistlib
+import shutil
+import subprocess
+import time
+
+source = pathlib.Path(__file__).resolve().parent.parent
+runtime = pathlib.Path.home() / 'Library/Application Support/key-c'
+runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+runtime.chmod(0o700)
+for folder in ('run', 'logs', 'secrets', 'workspace'):
+    (runtime / folder).mkdir(mode=0o700, exist_ok=True)
+installed = runtime / 'app'
+if source != installed:
+    shutil.copytree(source, installed, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('.git', '__pycache__', '.env', '*.log'))
+label = 'com.keyc.remote-terminal'
+plist = pathlib.Path.home() / 'Library/LaunchAgents' / f'{label}.plist'
+(pathlib.Path.home() / 'Library/LaunchAgents').mkdir(parents=True, exist_ok=True)
+target = f'gui/{os.getuid()}'
+subprocess.run(['launchctl', 'bootout', f'{target}/{label}'],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for attempt in range(50):
+    if subprocess.run(['launchctl', 'print', f'{target}/{label}'],
+                      capture_output=True).returncode:
+        break
+    time.sleep(0.2)
+config = {
+    'Label': label,
+    'ProgramArguments': [str(installed / 'bin/terminal-server')],
+    'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10, 'Umask': 63,
+    'WorkingDirectory': str(installed),
+    'StandardOutPath': str(runtime / 'logs/terminal.log'),
+    'StandardErrorPath': str(runtime / 'logs/terminal.log'),
+    'EnvironmentVariables': {
+        'HOME': str(pathlib.Path.home()),
+        'PATH': os.environ.get('PATH', os.defpath),
+    },
+}
+plist.write_bytes(plistlib.dumps(config))
+plist.chmod(0o600)
+for attempt in range(20):
+    result = subprocess.run(['launchctl', 'bootstrap', target, str(plist)], capture_output=True)
+    if result.returncode == 0:
+        break
+    time.sleep(0.5)
+else:
+    raise SystemExit(result.stderr.decode())
+print('Local terminal installed. Public access is not configured by this command.')

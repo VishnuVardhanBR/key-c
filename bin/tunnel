@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+umask 077
+RUNTIME="$HOME/Library/Application Support/key-c"
+exec cloudflared --no-autoupdate tunnel \
+  --metrics 127.0.0.1:17683 run --token-file "$RUNTIME/secrets/tunnel-token"
