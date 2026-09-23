@@ -3,9 +3,9 @@ const encoded = value => JSON.stringify(value).replaceAll('<', '\\u003c');
 export function portalPage(ticket) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>key-c</title>
   <style>
-  :root{color-scheme:dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#111714;color:#edf3ee}*{box-sizing:border-box}body{margin:0}button,a{font:inherit}button{cursor:pointer;color:inherit;background:#1c2820;border:1px solid #435348;border-radius:8px;padding:12px 20px}button:hover{background:#263a2c}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible{outline:3px solid #b9e9ac;outline-offset:4px}header{height:60px;padding:0 20px;display:flex;align-items:center;justify-content:flex-end;gap:12px;border-bottom:1px solid #2d3831}main{max-width:560px;margin:15vh auto;padding:24px}.apps{display:grid;grid-template-columns:1fr 1fr;gap:16px}.app{padding:28px;font-size:22px}#status{color:#aebfb2}#workspace{position:fixed;inset:60px 0 0;display:none}iframe{width:100%;height:100%;border:0}#back{display:none}.locked{text-align:center}.locked a{color:#c0e9af}@media(max-width:420px){.apps{grid-template-columns:1fr}}
+  :root{color-scheme:dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#111714;color:#edf3ee}*{box-sizing:border-box}body{margin:0}button,a{font:inherit}button{cursor:pointer;color:inherit;background:#1c2820;border:1px solid #435348;border-radius:8px;padding:12px 20px}button:hover{background:#263a2c}button:disabled{opacity:.5;cursor:wait}button:focus-visible,a:focus-visible{outline:3px solid #b9e9ac;outline-offset:4px}header{height:60px;padding:0 20px;display:flex;align-items:center;justify-content:flex-end;gap:12px;border-bottom:1px solid #2d3831}main{max-width:760px;margin:15vh auto;padding:24px}.apps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.app{padding:28px;font-size:22px}#status{color:#aebfb2}#workspace{position:fixed;inset:60px 0 0;display:none}iframe{width:100%;height:100%;border:0}#back{display:none}.locked{text-align:center}.locked a{color:#c0e9af}@media(max-width:600px){.apps{grid-template-columns:1fr}}
   </style></head><body><header><button id="back">All apps</button><button id="lock">Lock</button></header>
-  <main id="chooser"><div class="apps"><button class="app" data-app="terminal" disabled>Terminal</button><button class="app" data-app="paseo" disabled>Paseo</button></div><p id="status" role="status">Connecting…</p></main><section id="workspace" aria-label="Workspace"></section>
+  <main id="chooser"><div class="apps"><button class="app" data-app="terminal" disabled>Terminal</button><button class="app" data-app="paseo" disabled>Paseo</button><button class="app" data-app="novnc" disabled>noVNC</button></div><p id="status" role="status">Connecting…</p></main><section id="workspace" aria-label="Workspace"></section>
   <script>(${portalClient})(${encoded(ticket)});</script></body></html>`;
 }
 
@@ -47,13 +47,13 @@ function portalClient(ticket) {
         'content-type': 'application/json' }, body: JSON.stringify({ app: button.dataset.app }) });
       if (!response.ok) return lock();
       const { url } = await response.json();
-      frame?.remove(); frame = document.createElement('iframe'); frame.title = button.dataset.app === 'paseo' ? 'Paseo' : 'Terminal';
+      frame?.remove(); frame = document.createElement('iframe'); frame.title = { terminal: 'Terminal', paseo: 'Paseo', novnc: 'noVNC' }[button.dataset.app];
       frame.allow = 'clipboard-read; clipboard-write; microphone; fullscreen';
       frame.src = url; workspace.replaceChildren(frame); workspace.style.display = 'block'; chooser.style.display = 'none';
       document.querySelector('#back').style.display = 'block'; document.title = 'key-c · ' + frame.title;
     } catch { lock(); }
   };
-  for (const type of ['pointerdown', 'keydown', 'input', 'wheel', 'touchstart'])
+  for (const type of ['pointerdown', 'pointermove', 'keydown', 'input', 'wheel', 'touchstart'])
     window.addEventListener(type, event => { if (event.isTrusted) activity(); }, { passive: true, capture: true });
   window.addEventListener('message', event => {
     if (event.origin === location.origin && event.source === frame?.contentWindow && event.data === 'key-c:activity') activity();
@@ -101,15 +101,17 @@ function bridgeClient(app, token) {
     return nativeSend.call(this, body);
   };
   const NativeWebSocket = window.WebSocket;
-  window.WebSocket = class extends NativeWebSocket {
-    constructor(raw, protocols) {
+  window.WebSocket = new Proxy(NativeWebSocket, {
+    construct(Target, [raw, protocols]) {
       const url = new URL(raw, location.href);
       if (url.host === location.host) {
         if (app === 'terminal') url.pathname = '/terminal/ws';
-        url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; super(authorize(url).href, protocols);
-      } else super(raw, protocols);
-    }
-  };
+        url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return new Target(authorize(url).href, protocols);
+      }
+      return new Target(raw, protocols);
+    },
+  });
   // Downloads/media may be initiated by elements instead of fetch().
   const decorate = raw => {
     const url = new URL(raw, location.href);
@@ -133,7 +135,7 @@ function bridgeClient(app, token) {
     Object.defineProperty(window, name, { configurable: true, value: storage });
   }
   let last = 0;
-  for (const type of ['pointerdown', 'keydown', 'input', 'wheel', 'touchstart'])
+  for (const type of ['pointerdown', 'pointermove', 'keydown', 'input', 'wheel', 'touchstart'])
     window.addEventListener(type, event => {
       if (event.isTrusted && Date.now() - last > 1000) {
         last = Date.now(); parent.postMessage('key-c:activity', location.origin);

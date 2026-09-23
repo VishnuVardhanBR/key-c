@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Enable Apple's Screen Sharing UI, then persist a loopback-only listener.
+
+Run interactively with sudo. Never edits /System or disables SIP.
+"""
+import os
+from pathlib import Path
+import plistlib
+import re
+import subprocess
+import sys
+import fcntl
+import socket
+
+
+def run(*args, check=True, **kwargs):
+    return subprocess.run(args, check=check, text=True, capture_output=True, **kwargs)
+
+
+def listeners():
+    result = run('/usr/sbin/lsof', '-nP', '-iTCP:5900', '-sTCP:LISTEN', '-Fn', check=False)
+    if result.returncode not in (0, 1) or result.stderr.strip():
+        raise RuntimeError('Cannot verify VNC listener addresses; keep the firewall guard.')
+    return {line[1:] for line in result.stdout.splitlines() if line.startswith('n')}
+
+
+if os.geteuid() != 0 or not sys.stdin.isatty():
+    sys.exit('Run sudo python3 bin/setup-novnc in a local interactive terminal.')
+lock = os.open('/var/run/key-c-novnc-setup.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit('Another noVNC setup is already running.')
+
+original = Path('/System/Library/LaunchDaemons/com.apple.screensharing.plist')
+directory = Path('/Library/key-c')
+modified = directory / 'screensharing.plist'
+launcher = Path('/Library/LaunchDaemons/com.keyc.screensharing.plist')
+label = 'com.keyc.screensharing'
+anchor = 'com.apple/000.key-c-vnc-setup'
+
+if '--remove' in sys.argv:
+    run('/bin/launchctl', 'bootout', 'system/' + label, check=False)
+    run('/bin/launchctl', 'disable', 'system/com.apple.screensharing')
+    run('/bin/launchctl', 'bootout', 'system/com.apple.screensharing', check=False)
+    if listeners():
+        sys.exit('Screen Sharing did not stop. Configuration was retained; turn it off before retrying removal.')
+    launcher.unlink(missing_ok=True)
+    modified.unlink(missing_ok=True)
+    if directory.exists() and not any(directory.iterdir()):
+        directory.rmdir()
+    print('Loopback service removed. Screen Sharing remains disabled.')
+    sys.exit(0)
+
+if directory.exists() or launcher.exists():
+    sys.exit('Existing /Library/key-c configuration found; review it before reinstalling.')
+if listeners():
+    sys.exit('Turn Screen Sharing OFF before running setup. No changes made.')
+
+# Protect all network interfaces while the operator authorizes screen capture in Settings.
+# Require the existing Apple anchor; never flush or replace the host firewall ruleset.
+rules = run('/sbin/pfctl', '-sr').stdout.strip()
+rules = '\n'.join(line for line in rules.splitlines()
+                  if line != 'scrub-anchor "com.apple/*" all fragment reassemble')
+if not re.fullmatch(r'anchor "com\.apple/\*"(?: all)?', rules):
+    sys.exit('A custom or missing main firewall ruleset needs manual review. No changes made.')
+anchors = run('/sbin/pfctl', '-s', 'Anchors', '-v').stdout.split()
+if any(name.startswith('com.apple/') and name < anchor for name in anchors):
+    sys.exit('An earlier firewall anchor needs manual review. No changes made.')
+nested = '\n'.join(run('/sbin/pfctl', '-a', name, '-sr').stdout for name in anchors)
+interfaces = run('/sbin/pfctl', '-s', 'Interfaces', '-v').stdout
+states = run('/sbin/pfctl', '-ss').stdout
+if re.search(r'\b(?:pass|anchor)\b[^\n]*\bquick\b', nested) or re.search(r'\bskip\b', interfaces, re.I):
+    sys.exit('Firewall quick-pass/skip rules need manual review. No changes made.')
+if re.search(r'[:.]5900\b', states):
+    sys.exit('Existing VNC connection states must expire before setup. No changes made.')
+guard = 'block drop in quick on ! lo0 proto tcp from any to any port 5900\n'
+run('/sbin/pfctl', '-a', anchor, '-f', '-', input=guard)
+enabled = run('/sbin/pfctl', '-E')
+match = re.search(r'Token\s*:\s*(\d+)', enabled.stdout + enabled.stderr)
+if not match:
+    sys.exit('Could not confirm the firewall reference. Leave Screen Sharing off.')
+token = match.group(1)
+installed = False
+try:
+    print('VNC is blocked on network interfaces during setup.', flush=True)
+    print('In System Settings > General > Sharing > Screen Sharing:', flush=True)
+    print('  Turn Screen Sharing on; allow only your Mac account.', flush=True)
+    print('  Turn off "Anyone may request permission".', flush=True)
+    print('  Leave "VNC viewers may control screen with password" off.', flush=True)
+    input('After completing those settings, press Return here: ')
+
+    config = plistlib.loads(original.read_bytes())
+    if config.get('Label') != 'com.apple.screensharing' or 'Listener' not in config.get('Sockets', {}):
+        raise RuntimeError('This macOS Screen Sharing service layout is unsupported.')
+    # Only replace socket addressing. Preserve Apple program and Mach-service definitions.
+    config['Sockets'] = {'Listener': {'SockNodeName': 'localhost', 'SockServiceName': '5900'}}
+    config['Disabled'] = True
+    directory.mkdir(mode=0o755)
+    modified.write_bytes(plistlib.dumps(config)); modified.chmod(0o644)
+    wrapper = {'Label': label, 'RunAtLoad': True, 'LaunchOnlyOnce': True,
+               'ProgramArguments': ['/bin/launchctl', 'load', '-F', str(modified)]}
+    launcher.write_bytes(plistlib.dumps(wrapper)); launcher.chmod(0o644)
+    # Keep Apple's wildcard listener disabled across reboot; force-load the loopback copy.
+    run('/bin/launchctl', 'disable', 'system/com.apple.screensharing')
+    run('/bin/launchctl', 'bootout', 'system/com.apple.screensharing', check=False)
+    run('/bin/launchctl', 'bootstrap', 'system', str(launcher))
+    import time
+    for _ in range(30):
+        addresses = listeners()
+        if addresses:
+            if not addresses <= {'127.0.0.1:5900', '[::1]:5900'} or '127.0.0.1:5900' not in addresses:
+                raise RuntimeError('VNC is not exclusively bound to loopback.')
+            installed = True
+            break
+        time.sleep(0.2)
+    if not installed:
+        raise RuntimeError('The loopback Screen Sharing service did not start.')
+    # A listening launchd socket alone does not prove screensharingd can start.
+    with socket.create_connection(('127.0.0.1', 5900), timeout=10) as peer:
+        def receive(length):
+            data = b''
+            while len(data) < length:
+                chunk = peer.recv(length - len(data))
+                if not chunk:
+                    raise RuntimeError('Screen Sharing closed during its health check.')
+                data += chunk
+            return data
+        if not receive(12).startswith(b'RFB '):
+            raise RuntimeError('Screen Sharing did not return an RFB greeting.')
+        peer.sendall(b'RFB 003.008\n')
+        types = receive(receive(1)[0])
+        if 30 not in types or 1 in types or 2 in types:
+            raise RuntimeError('Require Mac account authentication; turn off legacy VNC-password access.')
+    print('Screen Sharing listens only on loopback port 5900. Test noVNC and recheck after reboot.')
+except BaseException:
+    # A cancelled/failed setup must never restore the network listener.
+    run('/bin/launchctl', 'disable', 'system/com.apple.screensharing', check=False)
+    run('/bin/launchctl', 'bootout', 'system/com.apple.screensharing', check=False)
+    run('/bin/launchctl', 'bootout', 'system/' + label, check=False)
+    raise
+finally:
+    try:
+        safe = listeners() <= {'127.0.0.1:5900', '[::1]:5900'}
+    except Exception:
+        safe = False
+    if safe:
+        run('/sbin/pfctl', '-a', anchor, '-F', 'rules', check=False)
+        run('/sbin/pfctl', '-X', token, check=False)
+    else:
+        print('VNC isolation could not be confirmed. The firewall guard has been retained.', file=sys.stderr)
+        print('Turn Screen Sharing OFF and verify no listener remains before releasing it:', file=sys.stderr)
+        print(f'  sudo pfctl -a {anchor} -F rules', file=sys.stderr)
+        print(f'  sudo pfctl -X {token}', file=sys.stderr)

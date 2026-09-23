@@ -21,6 +21,14 @@ async function fixture(t, options = {}) {
     res.setHeader('content-type', req.url === '/' ? 'text/html' : 'application/json');
     res.end(req.url === '/' ? '<html><head></head><body>app</body></html>' : '{"ok":true}');
   };
+  const vncClients = new Set();
+  let vncConnections = 0;
+  const vnc = net.createServer(peer => {
+    vncConnections++; vncClients.add(peer);
+    peer.on('data', data => peer.write(data));
+    peer.on('error', () => {}); peer.on('close', () => vncClients.delete(peer));
+  });
+  vnc.listen(0, '127.0.0.1'); await once(vnc, 'listening');
   const terminal = http.createServer(responder), paseo = http.createServer(responder);
   terminal.listen(socketPath); paseo.listen(0, '127.0.0.1');
   await Promise.all([once(terminal, 'listening'), once(paseo, 'listening')]);
@@ -34,7 +42,7 @@ async function fixture(t, options = {}) {
   });
   let expiry = Math.floor(Date.now() / 1000) + 60;
   const gateway = createPortalGateway({ hostname: 'computer.example.com', socketPath,
-    paseoPort: paseo.address().port, paseoPassword: 'backend-secret-not-for-browser', assetDirectory: directory,
+    vncPort: vnc.address().port, paseoPort: paseo.address().port, paseoPassword: 'backend-secret-not-for-browser', assetDirectory: directory,
     verify: async token => { if (token !== 'valid') throw Error('Denied'); return { sub: 'owner', exp: expiry }; },
     freshLogin: { consume(req) { const ticket = new URL(req.url, 'https://computer.example.com').searchParams.get('ticket');
       if (!tickets.delete(ticket)) throw Error('Fresh key required'); },
@@ -62,14 +70,15 @@ async function fixture(t, options = {}) {
   };
   t.after(async () => {
     gateway.closeConnections(); for (const ws of clients) ws.terminate();
+    for (const peer of vncClients) peer.destroy();
     for (const backend of backends) for (const peer of backend.clients) peer.terminate();
-    await Promise.all([gateway, terminal, paseo].map(server => new Promise(resolve => server.close(resolve))));
+    await Promise.all([gateway, terminal, paseo, vnc].map(server => new Promise(resolve => server.close(resolve))));
     await rm(directory, { recursive: true, force: true });
   });
-  return { request, open, control, launch, observed, port, headers, expiry: value => expiry = value };
+  return { request, open, control, launch, observed, port, headers, vncClients, vncConnections: () => vncConnections, expiry: value => expiry = value };
 }
 
-test('both apps require a fresh key, one-use document grant, and active in-memory session', async t => {
+test('all apps require a fresh key, one-use document grant, and active in-memory session', async t => {
   const f = await fixture(t);
   assert.equal((await f.request('/api/status')).status, 403);
   await assert.rejects(() => f.open('/ws', undefined), /403/);
@@ -77,7 +86,7 @@ test('both apps require a fresh key, one-use document grant, and active in-memor
   const { ws, token } = await f.control('fresh-one');
   await assert.rejects(() => f.control('fresh-one'), /403/);
   assert.equal((await f.request('/api/status', token)).status, 200);
-  for (const app of ['terminal', 'paseo']) {
+  for (const app of ['terminal', 'paseo', 'novnc']) {
     const url = await f.launch(token, app), page = await f.request(url);
     assert.equal(page.status, 200); assert.match(page.body, /bridgeClient/);
     assert.doesNotMatch(page.body, /backend-secret-not-for-browser/);
@@ -155,4 +164,56 @@ test('aborted launch bodies cannot interrupt the gateway or active session', asy
   await delay(40); socket.destroy(); await delay(40);
   assert.equal((await f.request('/api/status', token)).status, 200);
   assert.equal((await f.request(await f.launch(token))).status, 200);
+});
+
+
+test('noVNC requires active auth and binary protocol before opening the fixed TCP backend', async t => {
+  const f = await fixture(t);
+  await assert.rejects(() => f.open('/novnc/ws', 'binary'), /403/);
+  assert.equal(f.vncConnections(), 0);
+  const { ws, token } = await f.control('fresh-one');
+  await assert.rejects(() => f.open('/novnc/ws?__key_c=' + token), /403/);
+  assert.equal(f.vncConnections(), 0);
+  const peer = await f.open('/novnc/ws?host=other.example.com&port=22&__key_c=' + token, 'binary');
+  assert.equal(f.vncConnections(), 1);
+  const binary = Buffer.from([0, 255, 13, 10, 128]);
+  peer.ws.send(binary);
+  const [message, isBinary] = await once(peer.ws, 'message');
+  assert.deepEqual(message, binary); assert.equal(isBinary, true);
+  const closed = once(peer.ws, 'close'); ws.close(); await closed;
+  await delay(30); assert.equal(f.vncClients.size, 0);
+  await assert.rejects(() => f.open('/novnc/ws?__key_c=' + token, 'binary'), /403/);
+});
+
+test('noVNC sockets are revoked on browser replacement, inactivity, and Access expiry', async t => {
+  const f = await fixture(t, { idleTimeoutMs: 250 });
+  const first = await f.control('fresh-one');
+  const peer = await f.open('/novnc/ws?__key_c=' + first.token, 'binary');
+  const closed = once(peer.ws, 'close');
+  const second = await f.control('fresh-two'); await closed;
+  const next = await f.open('/novnc/ws?__key_c=' + second.token, 'binary');
+  const traffic = setInterval(() => { if (next.ws.readyState === WebSocket.OPEN) next.ws.send(Buffer.from('frame')); }, 30);
+  t.after(() => clearInterval(traffic));
+  await once(next.ws, 'close'); assert.equal(second.ws.readyState, WebSocket.CLOSED);
+  f.expiry(Date.now() / 1000 + 0.15);
+  const third = await f.control('fresh-three');
+  const last = await f.open('/novnc/ws?__key_c=' + third.token, 'binary');
+  await once(last.ws, 'close'); await delay(30); assert.equal(f.vncClients.size, 0);
+});
+
+test('noVNC assets are confined to the installed library; the document is one-use and uncached', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.request('/novnc/core/rfb.js')).status, 200);
+  assert.equal((await f.request('/novnc/core/rfb.js', undefined, { headers: { 'cf-access-jwt-assertion': 'invalid' } })).status, 403);
+  const { token } = await f.control('fresh-one');
+  for (const path of ['/novnc/package.json', '/novnc/core/%2e%2e%2f%2e%2e%2fpackage.json', '/novnc/core/%2e%2e%2f%2e%2e%2foutside.js'])
+    assert.equal((await f.request(path, token)).status, 404);
+  const url = await f.launch(token, 'novnc');
+  const page = await f.request(url);
+  assert.equal(page.status, 200); assert.equal(page.headers['cache-control'], 'no-store');
+  assert.match(page.body, /novncClient/); assert.match(page.body, /autocomplete="off"/);
+  assert.equal((await f.request(url)).status, 403);
+  const peer = await f.open('/novnc/ws?__key_c=' + token, 'binary');
+  peer.ws.send('text'); await once(peer.ws, 'close');
+  assert.equal((await f.request('/api/status', token)).status, 200);
 });

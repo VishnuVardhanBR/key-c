@@ -5,6 +5,8 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { resolve, sep, extname } from 'node:path';
 import WebSocket, { WebSocketServer } from 'ws';
 import { applicationBridge } from './portal-view.mjs';
+import { novncPage } from './novnc-view.mjs';
+import { fileURLToPath } from 'node:url';
 
 const random = () => randomBytes(32).toString('base64url');
 const baseHeaders = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
@@ -17,13 +19,15 @@ const isAsset = path => /^\/(?:_expo\/static\/|assets\/)/.test(path) ||
   /^\/(?:favicon\.ico|manifest\.json|metadata\.json|apple-touch-icon\.png|pwa-icon-(?:192|512)\.png)$/.test(path);
 
 export function createPortalGateway({ hostname, socketPath, verify, freshLogin, paseoPort = 6767,
-  paseoPassword, assetDirectory, idleTimeoutMs = 120000, documentLifetimeMs = 30000 }) {
+  paseoPassword, assetDirectory, vncPort = 5900,
+  novncDirectory = fileURLToPath(new URL('./node_modules/@novnc/novnc/', import.meta.url)),
+  idleTimeoutMs = 120000, documentLifetimeMs = 30000 }) {
   let active;
   const rawSockets = new Set();
   const documents = new Map();
   const websocketServer = new WebSocketServer({ noServer: true, perMessageDeflate: false,
     maxPayload: 16 * 1024 * 1024, handleProtocols: protocols =>
-      protocols.has('key-c') ? 'key-c' : protocols.has('tty') ? 'tty' : false });
+      protocols.has('key-c') ? 'key-c' : protocols.has('tty') ? 'tty' : protocols.has('binary') ? 'binary' : false });
   const send = (response, status, body = '', headers = {}) => {
     response.writeHead(status, { ...baseHeaders, ...headers }); response.end(body);
   };
@@ -65,8 +69,8 @@ export function createPortalGateway({ hostname, socketPath, verify, freshLogin, 
     });
     req.setTimeout(10000, () => req.destroy(new Error('App timeout'))); req.on('error', reject);
   });
-  async function staticAsset(path, response) {
-    const root = await realpath(assetDirectory);
+  async function staticAsset(path, response, directory = assetDirectory) {
+    const root = await realpath(directory);
     const candidate = await realpath(resolve(root, '.' + decodeURIComponent(path)));
     if (!candidate.startsWith(root + sep) || !types[extname(candidate)]) throw new Error('Unknown asset');
     const info = await stat(candidate);
@@ -86,7 +90,11 @@ export function createPortalGateway({ hostname, socketPath, verify, freshLogin, 
       // Only immutable application files, never daemon API responses or user data.
       try { return await staticAsset(path, response); } catch { return send(response, 404); }
     }
-    if (/^\/view\/(terminal|paseo)$/.test(path) && request.method === 'GET') {
+    if (/^\/novnc\/(?:core|vendor)\/.*\.js$/.test(path) && ['GET', 'HEAD'].includes(request.method)) {
+      try { return await staticAsset(path.slice('/novnc'.length), response, novncDirectory); }
+      catch { return send(response, 404); }
+    }
+    if (/^\/view\/(terminal|paseo|novnc)$/.test(path) && request.method === 'GET') {
       const grant = url.searchParams.get('grant'), document = documents.get(grant);
       documents.delete(grant);
       if (!document || document.expires <= Date.now() || document.session !== active ||
@@ -94,7 +102,7 @@ export function createPortalGateway({ hostname, socketPath, verify, freshLogin, 
           document.subject !== owner.sub || document.app !== path.split('/')[2]) return deny(response);
       const session = active;
       try {
-        const html = await fetchDocument(document.app === 'terminal');
+        const html = document.app === 'novnc' ? novncPage() : await fetchDocument(document.app === 'terminal');
         if (session !== active || session.closed || session.expiry <= Date.now() ||
             session.lastInput + idleTimeoutMs <= Date.now() || !html.includes('<head>')) return deny(response);
         return send(response, 200, html.replace('<head>', '<head>' + applicationBridge(document.app, session.token)),
@@ -111,7 +119,7 @@ export function createPortalGateway({ hostname, socketPath, verify, freshLogin, 
         }
         authorize(request, owner);
         const { app } = JSON.parse(body);
-        if (!['terminal', 'paseo'].includes(app)) return send(response, 400);
+        if (!['terminal', 'paseo', 'novnc'].includes(app)) return send(response, 400);
         for (const [key, value] of documents) if (value.expires <= Date.now()) documents.delete(key);
         if (documents.size >= 32) return send(response, 429);
         const grant = random();
@@ -179,6 +187,47 @@ export function createPortalGateway({ hostname, socketPath, verify, freshLogin, 
     }
     let session;
     try { session = authorize(request, owner); } catch { return deny(client); }
+    if (url.pathname === '/novnc/ws') {
+      if (request.headers['sec-websocket-protocol'] !== 'binary') return deny(client);
+      // Fixed loopback destination; never accept a host/port supplied by the browser.
+      const origin = net.connect({ host: '127.0.0.1', port: vncPort });
+      origin.pause();
+      let browser, closed = false;
+      const stop = () => {
+        if (closed) return;
+        closed = true; session.jobs.delete(stop); origin.destroy();
+        if (browser) { browser.close(1000, 'Session ended'); setTimeout(() => browser.terminate(), 1000).unref(); }
+        else client.destroy();
+      };
+      session.jobs.add(stop);
+      client.on('close', stop); origin.on('error', stop); origin.on('close', stop);
+      origin.setTimeout(10000, stop);
+      origin.on('connect', () => {
+        if (closed || session.closed || session !== active || session.expiry <= Date.now() ||
+            session.lastInput + idleTimeoutMs <= Date.now()) return stop();
+        origin.setTimeout(0);
+        websocketServer.handleUpgrade(request, client, head, connected => {
+          browser = connected;
+          browser.on('error', stop); browser.on('close', stop);
+          browser.on('message', (data, binary) => {
+            if (closed || session.closed) return;
+            if (!binary || origin.writableLength > 16 * 1024 * 1024) return stop();
+            if (!origin.write(data)) browser.pause();
+          });
+          origin.on('drain', () => { if (!closed) browser.resume(); });
+          origin.on('data', data => {
+            if (closed || session.closed) return;
+            browser.send(data, { binary: true }, error => {
+              if (error) return stop();
+              if (!closed && browser.bufferedAmount < 65536) origin.resume();
+            });
+            if (browser.bufferedAmount >= 65536) origin.pause();
+          });
+          origin.resume();
+        });
+      });
+      return;
+    }
     const terminal = url.pathname === '/terminal/ws';
     if (!terminal && url.pathname !== '/ws') return deny(client);
     if (terminal && request.headers['sec-websocket-protocol'] !== 'tty') return deny(client);

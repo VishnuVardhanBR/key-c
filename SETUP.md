@@ -96,12 +96,28 @@ Services run as the logged-in macOS user. Runtime files live under `~/Library/Ap
 
 The pinned Paseo native terminal prebuild has been tested on Apple Silicon. On another platform, verify native dependency support/build prerequisites before deployment. The Mac must remain awake, online, and logged in; these are user LaunchAgents, not pre-login system daemons.
 
-## 6. Acceptance, maintenance, recovery
+## 6. Desktop (noVNC)
+
+The third option uses [noVNC](https://novnc.com/info.html) 1.7.0, served locally from the pinned dependency. The gateway bridges its authenticated WebSocket to **127.0.0.1:5900 only**; there is no separate websockify port or public VNC route.
+
+On the Mac, run in an interactive terminal:
+
+```sh
+sudo python3 bin/setup-novnc
+```
+
+The helper temporarily blocks network VNC traffic, waits while you enable Screen Sharing in System Settings, then replaces the listener with a loopback-only copy. Allow only your Mac account; disable permission requests and leave legacy VNC-password access off. noVNC supports Apple's account authentication and asks for the Mac username/password when required. Credentials remain in the open page only; decline browser password-saving prompts.
+
+The helper needs the standard macOS `com.apple/*` firewall anchor and Apple Screen Sharing service layout. It does not edit `/System` or disable SIP. It installs root-owned files at `/Library/key-c/screensharing.plist` and `/Library/LaunchDaemons/com.keyc.screensharing.plist`, leaving the original wildcard service disabled. If setup fails or is cancelled, the helper attempts to stop Screen Sharing and retains the firewall guard if isolation cannot be confirmed. Recheck after macOS updates, reboot, or changing Sharing settings: `sudo lsof -nP -iTCP:5900 -sTCP:LISTEN` must show only `127.0.0.1:5900` and `[::1]:5900`. Other macOS versions may require adjustments; do not continue with a network-facing listener.
+
+To remove the helper, run `sudo python3 bin/setup-novnc --remove`; it leaves Screen Sharing disabled. noVNC requires the Mac to be awake. Locking key-c disconnects the viewer, not the macOS desktop; local applications keep running. Full screen, clipboard transfer, and a mobile keyboard are available in the viewer.
+
+## 7. Acceptance, maintenance, recovery
 
 Before depending on remote access, verify:
 
 - A registered YubiKey opens the chooser; immediate refresh requires a new physical key check. An unregistered key and retained cookies alone cannot open an app.
-- Terminal accepts a harmless command and Paseo connects. All apps switches without a new sign-in.
+- Terminal accepts a harmless command, Paseo connects, and noVNC displays the desktop and accepts input. All apps switches without a new sign-in.
 - Two minutes without interaction locks and clears the page; output alone cannot keep it open. A new browser replaces the old one; disconnected browsers require fresh sign-in.
 - Management APIs and recovery/enrollment routes return 404 publicly, even with an admin token. Invalid Access assertions, unknown hosts, and foreign WebSocket origins are rejected.
 - Listeners are loopback or private Unix sockets. Browser disconnection preserves work; service restart, reboot, sleep/wake, and local recovery behave as expected.

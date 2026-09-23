@@ -9,6 +9,7 @@ This is a bounded source/configuration review, not a penetration-test certificat
 - A 30-second, single-use ticket opens one browser control connection. App documents use one-use grants; APIs and WebSockets require the active in-memory capability.
 - A new valid browser replaces the old one. Idle expiry, Access-token expiry, and control disconnection revoke all associated app access. Background traffic does not extend idle.
 - Proxying strips browser cookies, Access assertions, and capability query parameters. Static files are constrained by realpath to the installed application bundle.
+- noVNC uses the same one-use document grants and active session checks. Its binary WebSocket connects only to a fixed loopback VNC port, closes on session revocation, and bounds buffering. Browser-supplied host/port values cannot select a destination.
 - The terminal uses a Unix socket. Gateway, identity, and Paseo listeners bind to loopback. Public identity management, recovery, and enrollment routes are blocked after provisioning.
 
 ## Findings addressed
@@ -22,6 +23,12 @@ This is a bounded source/configuration review, not a penetration-test certificat
 | Paseo transitives had published advisories | Pinned overrides for `uuid`, `markdown-it`, `linkify-it`, `ai`, and `undici`; audit and compatibility checks required on updates |
 
 An independent reviewer verified the original gateway corrections and its 17 regression tests. Publication adds separate configuration checks. The generalized installer has not been exercised through fresh hardware enrollment on every supported Mac; the manual acceptance steps in SETUP.md remain necessary.
+
+## Desktop setup
+
+noVNC is pinned and served locally; no CDN or independent public proxy is used. The macOS setup helper temporarily blocks inbound non-loopback VNC traffic, then installs a root-owned loopback listener without changing SIP. Verify its binding after installation, reboot, system updates, and Sharing-setting changes. The legacy VNC password option stays off; Mac account authentication is additional to key-c's YubiKey check. The open viewer holds authentication state and clipboard text in memory and clears its UI on disconnect. No browser storage is used for credentials; password-manager behavior is controlled by the client browser.
+
+The VNC backend itself does not enforce key-c's single-browser rule for other local clients. Processes already running locally can reach it and still need the Mac's VNC authentication. Disconnecting key-c does not lock the physical macOS desktop.
 
 ## Trust boundaries
 
