@@ -60,23 +60,27 @@ def log(message):
     print(f'{datetime.now(timezone.utc).isoformat(timespec="seconds")} {message}', flush=True)
 
 
-def healthy(name):
+def probe_status(name):
     # Probes are local, unauthenticated, and never print response bodies or tokens.
     probes = {
-        'terminal': ('http://localhost/', '200', ['--unix-socket', str(RUNTIME / 'run/ttyd.sock')]),
-        'paseo': ('http://127.0.0.1:6767/', '200', []),
-        'origin': ('http://127.0.0.1:17682/', '403', []),
-        'tunnel': ('http://127.0.0.1:17683/ready', '200', []),
+        'terminal': ('http://localhost/', ['--unix-socket', str(RUNTIME / 'run/ttyd.sock')]),
+        'paseo': ('http://127.0.0.1:6767/', []),
+        'origin': ('http://127.0.0.1:17682/', []),
+        'tunnel': ('http://127.0.0.1:17683/ready', []),
     }
     if name == 'identity':
         # The existing identity supervisor owns container health and VM recovery.
-        return True
-    url, expected, extra = probes[name]
+        return '200'
+    url, extra = probes[name]
     result = subprocess.run(['/usr/bin/curl', '--silent', '--noproxy', '*',
                              '--max-time', '5', '--output', '/dev/null',
                              '--write-out', '%{http_code}', *extra, url],
                             capture_output=True, text=True, timeout=8)
-    return result.returncode == 0 and result.stdout == expected
+    return result.stdout if result.returncode == 0 else None
+
+
+def healthy(name):
+    return probe_status(name) == ('403' if name == 'origin' else '200')
 
 
 def recover(name, args, record, now, reason):
@@ -113,14 +117,26 @@ def check_once():
                 elif not re.search(r'^\s*pid = \d+\s*$', status.stdout, re.MULTILINE):
                     recover(name, ('kickstart', service(name)), record, now,
                             'service was not running')
-                elif healthy(name):
-                    record['failures'] = 0
                 else:
-                    record['failures'] = record.get('failures', 0) + 1
-                    log(f'{name}: health check failed ({record["failures"]}/3)')
-                    if record['failures'] >= 3:
-                        recover(name, ('kickstart', '-k', service(name)), record, now,
-                                'three consecutive health checks failed')
+                    code = probe_status(name)
+                    if name == 'tunnel' and code == '503':
+                        # The connector is responsive but has no edge connections.
+                        # Let its own retry/fallback run; restarting cannot fix a
+                        # network outage and resets its reconnection progress.
+                        if not record.get('disconnected'):
+                            log('tunnel: disconnected; waiting for cloudflared to reconnect')
+                        record['disconnected'] = True
+                        record['failures'] = 0
+                    elif code == ('403' if name == 'origin' else '200'):
+                        if record.pop('disconnected', False):
+                            log('tunnel: connection restored')
+                        record['failures'] = 0
+                    else:
+                        record['failures'] = record.get('failures', 0) + 1
+                        log(f'{name}: health check failed ({record["failures"]}/3)')
+                        if record['failures'] >= 3:
+                            recover(name, ('kickstart', '-k', service(name)), record, now,
+                                    'three consecutive health checks failed')
             except (OSError, subprocess.SubprocessError) as error:
                 log(f'{name}: check could not finish ({type(error).__name__})')
         temporary = STATE.with_suffix('.tmp')

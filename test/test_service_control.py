@@ -32,6 +32,7 @@ class ServiceControls(TestCase):
             self.enterContext(patch.object(module, 'PAUSED', self.paused))
             self.enterContext(patch.object(module, 'service_lock', lambda **kw: nullcontext(True)))
         self.enterContext(patch.object(control, 'STATE', self.root / 'state.json'))
+        self.enterContext(patch.object(watchdog, 'STATE', self.root / 'watchdog-state.json'))
         self.enterContext(patch.object(menu, 'PREFERENCES', self.root / 'menu.json'))
         self.enterContext(patch.object(control, 'plist', self.plist))
         self.enterContext(patch.object(control, 'launchctl', self.launchctl))
@@ -120,7 +121,7 @@ class ServiceControls(TestCase):
         state = self.root / 'watchdog-state.json'
         with patch.object(watchdog, 'STATE', state), patch.object(watchdog, 'NAMES', ('origin',)), \
                 patch.object(watchdog, 'launchctl', self.launchctl), \
-                patch.object(watchdog, 'healthy', return_value=False), patch('builtins.print'):
+                patch.object(watchdog, 'probe_status', return_value=None), patch('builtins.print'):
             watchdog.check_once()
             watchdog.check_once()
             self.assertFalse(any('-k' in c for c in self.calls))
@@ -129,6 +130,29 @@ class ServiceControls(TestCase):
             for _ in range(3):
                 watchdog.check_once()
             self.assertEqual(1, sum('-k' in c for c in self.calls))
+
+    def test_disconnected_tunnel_is_not_restarted_and_recovers(self):
+        state = self.root / 'watchdog-state.json'
+        with patch.object(watchdog, 'STATE', state), patch.object(watchdog, 'NAMES', ('tunnel',)), \
+                patch.object(watchdog, 'launchctl', self.launchctl), \
+                patch.object(watchdog, 'probe_status', return_value='503') as probe, patch('builtins.print'):
+            for _ in range(6):
+                watchdog.check_once()
+            self.assertFalse(any('-k' in c for c in self.calls))
+            self.assertTrue(json.loads(state.read_text())['tunnel']['disconnected'])
+            probe.return_value = '200'
+            watchdog.check_once()
+            self.assertFalse(json.loads(state.read_text())['tunnel'].get('disconnected', False))
+
+    def test_running_tunnel_is_not_reported_connected_when_readiness_fails(self):
+        with patch.object(menu, 'running', return_value=123), \
+                patch.object(menu, 'login_enabled', return_value=True), \
+                patch.object(menu, 'portal_url', return_value=None), \
+                patch.object(menu, 'healthy', return_value=False), \
+                patch.object(menu.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '0', '')):
+            state = menu.status()
+            self.assertEqual(123, state['services']['tunnel'])
+            self.assertFalse(state['tunnel_connected'])
 
 
 if __name__ == '__main__':

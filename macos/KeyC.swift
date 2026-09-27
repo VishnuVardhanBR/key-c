@@ -3,6 +3,7 @@ import AppKit
 struct Snapshot: Decodable {
     let enabled: Bool
     let services: [String: Int?]
+    let tunnel_connected: Bool?
     let keep_awake: Bool
     let awake_pid: Int?
     let open_at_login: Bool
@@ -63,12 +64,17 @@ final class KeyCApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         let allRunning = snapshot?.services.values.allSatisfy { $0 != nil } == true
         let label = busy ? "Updating…" : snapshot.map {
-            $0.enabled ? (allRunning ? "Key C · Running" : "Key C · Needs Attention") : "Key C · Off"
+            !$0.enabled ? "Key C · Off" : !allRunning ? "Key C · Needs Attention" :
+                $0.tunnel_connected == true ? "Key C · Connected" : "Key C · Tunnel Disconnected"
         } ?? "Key C · Checking…"
         add(label)
-        item.button?.title = snapshot?.enabled == false ? " C · Off" : " C"
+        item.button?.title = snapshot?.enabled == false ? " C · Off" :
+            snapshot?.tunnel_connected == false ? " C · Offline" : " C"
         item.button?.toolTip = label
         if let error = lastError { add(String(error.prefix(95))) }
+        if snapshot?.enabled == true && snapshot?.tunnel_connected == false {
+            add("Cloudflare connection unavailable")
+        }
         menu.addItem(.separator())
         add("Open Key C", #selector(openPortal), enabled: snapshot?.portal_url != nil)
         add(snapshot?.enabled == false ? "Turn Key C On" : "Turn Key C Off", #selector(toggleEnabled),
@@ -85,7 +91,9 @@ final class KeyCApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for (name, title) in [("identity", "Identity"), ("terminal", "Terminal"), ("paseo", "Paseo"),
                               ("origin", "Gateway"), ("tunnel", "Tunnel")] {
             let running = snapshot?.services[name].flatMap { $0 } != nil
-            let row = NSMenuItem(title: "\(title): \(running ? "Running" : "Stopped")", action: nil, keyEquivalent: "")
+            let state = !running ? "Stopped" : name == "tunnel" ?
+                (snapshot?.tunnel_connected == true ? "Connected" : "Disconnected") : "Running"
+            let row = NSMenuItem(title: "\(title): \(state)", action: nil, keyEquivalent: "")
             row.isEnabled = false
             services.addItem(row)
         }

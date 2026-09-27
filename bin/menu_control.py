@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 
-from service_watchdog import DOMAIN, NAMES, PAUSED, RUNTIME, launchctl, plist, service, service_lock
+from service_watchdog import DOMAIN, NAMES, PAUSED, RUNTIME, healthy, launchctl, plist, service, service_lock
 
 AWAKE_LABEL = 'com.keyc.awake'
 MENU_LABEL = 'com.keyc.menubar'
@@ -85,7 +85,12 @@ def status():
     lock = subprocess.run(['/usr/bin/defaults', 'read',
                            '/Library/Preferences/com.apple.RemoteManagement',
                            'RestoreMachineState'], capture_output=True, text=True, timeout=5)
+    try:
+        connected = bool(jobs['tunnel']) and healthy('tunnel')
+    except (OSError, subprocess.SubprocessError):
+        connected = False
     return {'enabled': not PAUSED.exists(), 'services': jobs,
+            'tunnel_connected': connected,
             'keep_awake': bool(settings().get('keep_awake', True)),
             'awake_pid': running(AWAKE_LABEL),
             'open_at_login': login_enabled(),

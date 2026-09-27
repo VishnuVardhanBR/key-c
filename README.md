@@ -202,11 +202,13 @@ This installs `~/Applications/Key C.app`, opens it at login, and adds `caffeinat
 - **Keep Desktop Unlocked** changes Screen Sharing's `RestoreMachineState` setting after macOS administrator approval. It leaves the physical desktop unlocked after disconnect; test with a fresh desktop session. YubiKey authentication is unchanged.
 - **Open Menu at Login** controls the menu's startup. Enabled services start at login independently. Quitting the menu keeps services running.
 
-The menu also opens the portal and logs and shows each service's process state. A process running does not guarantee an end-to-end sign-in will succeed.
+The menu also opens the portal and logs and checks the tunnel's connection status. It shows **Offline** when the tunnel process is alive but cannot connect to Cloudflare. A connected tunnel does not guarantee an end-to-end sign-in will succeed.
 
 ### Command line
 
-Use `bin/control status`, `bin/control stop`, or `bin/control start`. Start preserves already running processes. The watchdog checks every 60 seconds and only restarts an unresponsive service after three failed checks, with a five-minute recovery cooldown.
+Use `bin/control status`, `bin/control stop`, or `bin/control start`. Start preserves already running processes. The watchdog checks every 60 seconds and only restarts an unresponsive service after three failed checks, with a five-minute recovery cooldown. A responsive tunnel with no Cloudflare connections keeps its own reconnection loop instead of being repeatedly restarted.
+
+If the login host shows Cloudflare error `1033`, check `logs/tunnel.log` and `curl http://127.0.0.1:17683/ready`. Repeated UDP and TCP timeouts on port `7844` point to a network/firewall problem. Test another network or allow outbound traffic to the [Cloudflare Tunnel endpoints](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/troubleshoot-tunnels/connectivity-prechecks/); restarting local apps will not clear an upstream block.
 
 Runtime/logs: `~/Library/Application Support/key-c`.
 
